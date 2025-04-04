@@ -417,4 +417,4 @@ ggplot(wf_data_final, aes(x = .pred, y = logQmean, colour = logQmean)) +
   scale_color_viridis_c()
 ```
 #### Describe what you think of the results!
-Looking at the plot, the results are pretty accurate. The plotted observed vs. predicted values lie relatively close to the 1:1 line, which means the predictions have a strong accuracy.
+Looking at the plot, the results are pretty accurate. The plotted observed vs. predicted values lie relatively close to the 1:1 line, especially towards the higher logQmean values, which means the predictions have a strong accuracy against the observed values.
