@@ -200,9 +200,9 @@ residuals_plot <- ggplot(residuals, aes(x = logQmean, y = residuals)) +
   geom_abline() +
   geom_smooth(method = "lm") + 
   theme_minimal() +
-  labs(title = "Random Forest Model - Residuals", 
-       x = "Actual (Log10)", 
-       y = "Predicted (Log10)", subtitle = ) 
+  labs(title = "Residuals of the Predictions", 
+       x = "Actual (log)", 
+       y = "Predicted (log)", subtitle = ) 
 
 predict_plot + residuals_plot
 ```
