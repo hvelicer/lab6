@@ -1,0 +1,208 @@
+---
+title: "Lab 8: Hyperparameter Tuning"
+author: "Hanna Velicer"
+format: 
+  html: 
+    self-contained: true
+editor: visual
+execute: 
+  echo: true
+---
+
+# Set Up (Data Import/Tidy/Transform)
+```{r}
+# Loading libraries
+library(dplyr)
+library(tidyverse)
+library(tidymodels)
+library(glue)
+library(powerjoin)
+library(ggplot2)
+library(patchwork)
+
+# Reading in the data
+root  <- 'https://gdex.ucar.edu/dataset/camels/file'
+
+download.file('https://gdex.ucar.edu/dataset/camels/file/camels_attributes_v2.0.pdf', 'data/camels_attributes_v2.0.pdf')
+
+types <- c("clim", "geol", "soil", "topo", "vege", "hydro")
+
+remote_files  <- glue('{root}/camels_{types}.txt')
+
+local_files   <- glue('data/camels_{types}.txt')
+
+walk2(remote_files, local_files, download.file, quiet = TRUE)
+
+# Cleaning the data
+camels <- map(local_files, read_delim, show_col_types = FALSE) 
+camels <- power_full_join(camels ,by = 'gauge_id')
+
+summary(camels)
+ls(camels)
+
+camels <- na.omit(camels)
+```
+
+# Data Splitting
+```{r}
+set.seed(123)
+
+camels <- camels %>%
+  mutate(logQmean = log(q_mean))
+
+camels_split <- initial_split(camels, prop = 0.8)
+camels_train <- training(camels_split)
+camels_test  <- testing(camels_split)
+```
+
+# Feature Engineering
+```{r}
+# Recipe
+rec <-  recipe(logQmean ~ aridity + p_mean, data = camels_train) %>%
+  step_log(all_predictors()) %>%
+  step_interact(terms = ~ aridity:p_mean) %>% 
+  step_naomit(all_predictors(), all_outcomes()) 
+```
+
+# Resampling and Model Testing
+```{r}
+# Build resamples
+camels_cv <- vfold_cv(camels_train, v = 10)
+
+# Build 3 candidate models
+xgb_mod <- boost_tree() %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+dt_mod <- decision_tree() %>% 
+  set_engine("rpart") %>% 
+  set_mode("regression")
+
+rf_mod <- rand_forest() %>% 
+  set_engine("ranger") %>%
+  set_mode("regression")
+
+# Test the models
+wf <- workflow_set(list(rec), list(boost  = xgb_mod, 
+                                  dt       = dt_mod,
+                                  ranger   = rf_mod)) %>% 
+  workflow_map(resamples = camels_cv,
+               metrics   = metric_set(mae, rsq, rmse))
+
+autoplot(wf)
+
+rank_results(wf, rank_metric = "rsq", select_best = TRUE)
+```
+#### Model Selection
+Based on the autoplot and the ranked results, I am selecting the random forest model. This model has the lowest RMSE out of the three choices and was ranked first for all the metrics. This model has type random forest, mode regression, and engine ranger. The random forest model is simple and does well with overfitting, which is why I think it's performing well.
+
+# Model Tuning
+```{r}
+# Build a model for chosen specification
+forest <- rand_forest(trees = tune(), min_n = tune()) %>% 
+  set_engine("ranger") %>%
+  set_mode("regression")
+
+# Create a workflow
+wf_forest <- workflow(rec, 
+                    rand_forest(mode       = "regression", 
+                               engine     = "ranger", 
+                               trees      = tune(), 
+                               min_n      = tune()))
+
+wf_forest = workflow() |>
+  add_recipe(rec) |>
+  add_model(forest)
+
+# Check the tunable ranges/values
+dials <- extract_parameter_set_dials(wf_forest) 
+dials$object
+
+# Define the search space
+my.grid <- dials %>% 
+  update(trees = trees(c(1, 2000))) %>%
+  grid_latin_hypercube(size = 25)
+
+# Tune the model
+model_params <-  tune_grid(
+    wf_forest,
+    resamples = camels_cv,
+    grid = my.grid,
+    metrics = metric_set(rmse, rsq, mae),
+    control = control_grid(save_pred = TRUE)
+  )
+
+autoplot(model_params)
+```
+Looking at the plot, as minimal node size increases, so does RSQ but MAE and RMSE decrease.
+```{r}
+# Check the skill of the tuned model
+tree_metrics = metric_set(rsq, rmse, mae)
+
+hp_best <- select_best(model_params, metric = "mae")
+
+wf_final <- finalize_workflow(wf_forest, hp_best)
+
+final_fit <- last_fit(wf_final, camels_split, metrics = tree_metrics)
+
+collect_metrics(final_fit)
+```
+The estimates for RSQ, RMSE, and MAE are all standard. MAE is the lowest metric and RSQ is the highest metric, which indicates a strong correlation in the model. Low RMSE and MAE values mean there is a low prediction error.
+```{r}
+show_best(model_params, metric = "mae")
+```
+Looking at the first row of `show_best`, model number 10 had 380 trees and 20 min_n returned a mean MAE of 0.38.
+```{r}
+hp_best <- select_best(model_params, metric = "mae")
+
+# Finalize the model
+final <- finalize_workflow(wf_forest, hp_best)
+```
+
+# Final Model Verification
+```{r}
+fit_final <- last_fit(final, camels_split, metrics = tree_metrics)
+
+collect_metrics(fit_final)
+```
+It appears that the final model performs well. It returned a value of 0.80 for RSQ which indiciates a high correlation for the model. The RMSE is ~0.61 which means the model has good accuracy. Finally, the MAE is ~0.34 indiciates an overall low error for the mode. Overall, it performed better on the test data than the training data. 
+```{r}
+collect_predictions(final_fit) %>% 
+  ggplot(aes(x = .pred, y = logQmean)) + 
+  geom_point() +
+  scale_color_viridis_c() +
+  geom_abline() + 
+  geom_smooth(method = "lm") + 
+  labs(title = "Predicted vs. Actual Values for the Final Model", 
+       x = "Predicted (log)", 
+       y = "Actual (log)")
+```
+
+# Building a Map
+```{r}
+full_predict = fit(final, data = camels) %>%
+  augment(new_data = camels) 
+
+residuals <- full_predict %>%
+  mutate(residuals=(.pred-logQmean)^2)
+
+predict_plot <- ggplot(full_predict, aes(x = logQmean, y = .pred)) + 
+  geom_point() + 
+  geom_abline() +
+  geom_smooth(method = "lm") +
+  theme_minimal() +
+  labs(title = "Random Forest Model", 
+       x = "Actual (log)", 
+       y = "Predicted (log)")
+
+residuals_plot <- ggplot(residuals, aes(x = logQmean, y = residuals)) + 
+  geom_point() + 
+  geom_abline() +
+  geom_smooth(method = "lm") + 
+  theme_minimal() +
+  labs(title = "Random Forest Model - Residuals", 
+       x = "Actual (Log10)", 
+       y = "Predicted (Log10)", subtitle = ) 
+
+predict_plot + residuals_plot
+```
